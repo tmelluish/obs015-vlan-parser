@@ -74,7 +74,7 @@ def test_workbook_has_three_sheets(tmp_path):
     out = tmp_path / "out.xlsx"
     write_workbook(parse_text(SAMPLE), str(out))
     wb = load_workbook(out)
-    assert wb.sheetnames == ["Switch VLANs", "Raw data", "Log"]
+    assert wb.sheetnames == ["Switch VLANs", "Raw data", "Log"]  # no summary passed
     assert [c.value for c in wb["Switch VLANs"][1]] == [
         "switch",
         "port",
@@ -232,3 +232,24 @@ def test_backspace_edited_command_still_parsed_in_both_modes():
         ], mode
         assert not [e for e in res.log if e.level != INFO or "skipped" in e.message]
         assert len(res.raw) == 6  # one per editor line (the trailing newline adds none)
+
+
+def test_summary_sheet_has_run_details_and_counts(tmp_path):
+    from datetime import datetime
+
+    from analysis.switch_parser import build_summary
+
+    res = parse_text(SAMPLE)
+    when = datetime(2026, 11, 13, 14, 5, 9)
+    summary = build_summary(res, "in.txt", "out.xlsx", "regex", when)
+    out = tmp_path / "o.xlsx"
+    write_workbook(res, str(out), summary=summary)
+    wb = load_workbook(out)
+    assert wb.sheetnames[-1] == "Summary"
+    got = {r[0].value: r[1].value for r in wb["Summary"].iter_rows(min_row=2)}
+    assert got["run date/time"] == "2026-11-13 14:05:09"
+    assert got["source file"] == "in.txt"
+    assert got["output rows"] == len(res.rows) == 5
+    assert got["switches with ports"] == 2
+    assert got["log SKIPPED"] == 2
+    assert got["log WARNING"] == 0

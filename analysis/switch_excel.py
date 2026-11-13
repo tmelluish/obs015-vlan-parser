@@ -1,11 +1,11 @@
-"""Write a ParseResult to a three-sheet Excel workbook."""
+"""Write a ParseResult to a four-sheet Excel workbook (the last sheet is the run summary)."""
 
 from __future__ import annotations
 
 import re
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from analysis.switch_parser import INFO, PROGRESS_EVERY, SKIPPED, WARNING, ParseResult, Progress
@@ -48,7 +48,12 @@ def _finish(ws, widths: list[int]) -> None:
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def write_workbook(res: ParseResult, path: str, progress: Progress | None = None) -> None:
+def write_workbook(
+    res: ParseResult,
+    path: str,
+    progress: Progress | None = None,
+    summary: list[tuple[str, str | int]] | None = None,
+) -> None:
     def tick(stage: str, i: int, total: int) -> None:
         if progress and (i % PROGRESS_EVERY == 0 or i == total):
             progress(stage, i, total)
@@ -76,6 +81,15 @@ def write_workbook(res: ParseResult, path: str, progress: Progress | None = None
         _append(ws, i + 1, [e.line_no, e.level, e.switch, e.message, e.text], LEVEL_FILL[e.level])
         tick("Writing 'Log'", i, len(res.log))
     _finish(ws, [8, 10, 28, 70, 90])
+
+    if summary:
+        ws = wb.create_sheet("Summary")
+        ws.append(["item", "value"])
+        for i, (item, value) in enumerate(summary, start=1):
+            _append(ws, i + 1, [item, value])
+            ws.cell(row=i + 1, column=2).alignment = Alignment(horizontal="left")
+        _finish(ws, [24, 90])
+        ws.auto_filter.ref = None
 
     if progress:
         progress("Saving file (can take a while)", 0, 0)

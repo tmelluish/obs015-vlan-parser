@@ -10,8 +10,10 @@ is dropped silently.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 # Colour codes, with or without the ESC byte (pasted text often loses it).
 CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\[[0-9;]*m")
@@ -351,3 +353,22 @@ def read_capture(path: str) -> str:
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16", errors="replace")
     return data.decode("utf-8-sig", errors="replace")
+
+
+def build_summary(
+    res: ParseResult, source: str, output: str, mode: str, run_at: datetime
+) -> list[tuple[str, str | int]]:
+    """Run details and aggregate counts only, shared by the terminal and the Summary sheet."""
+    log_counts = Counter(e.level for e in res.log)
+    return [
+        ("run date/time", run_at.isoformat(sep=" ", timespec="seconds")),
+        ("source file", source),
+        ("output file", output),
+        ("mode", mode),
+        ("input lines", len(res.raw)),
+        ("switches with ports", len({r.switch for r in res.rows})),
+        ("output rows", len(res.rows)),
+        ("distinct ports", len({(r.switch, r.port) for r in res.rows})),
+        ("rows with a MAC", sum(1 for r in res.rows if r.mac)),
+        *((f"log {lvl}", log_counts.get(lvl, 0)) for lvl in (SKIPPED, WARNING, INFO)),
+    ]
