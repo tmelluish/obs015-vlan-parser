@@ -75,7 +75,14 @@ def test_workbook_has_three_sheets(tmp_path):
     write_workbook(parse_text(SAMPLE), str(out))
     wb = load_workbook(out)
     assert wb.sheetnames == ["Switch VLANs", "Raw data", "Log"]
-    assert [c.value for c in wb["Switch VLANs"][1]] == ["switch", "port", "VLAN", "MAC address"]
+    assert [c.value for c in wb["Switch VLANs"][1]] == [
+        "switch",
+        "port",
+        "VLAN",
+        "MAC address",
+        "port status",
+        "port name",
+    ]
     assert wb["Switch VLANs"].max_row == 1 + 5
     assert wb["Raw data"].max_row == 1 + len(SAMPLE.splitlines())
 
@@ -135,3 +142,14 @@ def test_unmatched_macs_and_bad_lines_are_logged():
     assert any("Gi3/0/99" in m for m in msgs)
     assert [e.level for e in res.log if "unrecognised" in e.message] == [SKIPPED]
     assert len(res.raw) == len(MAC_SAMPLE.splitlines())
+
+
+def test_status_and_name_captured():
+    res = parse_text(SAMPLE)
+    got = [(r.port, r.status, r.name) for r in res.rows]
+    assert got[:4] == [
+        ("Te1/0/1", "connected", "BTCM Link to skfl-"),
+        ("Te1/0/2", "monitoring", "Server access"),
+        ("Te1/0/3", "notconnect", ""),
+        ("Gi2/0/1", "disabled", "uplink disabled x"),
+    ]

@@ -2,7 +2,7 @@
 
     uv run python switch_to_excel.py --input "C:\\path\\to\\capture.txt" --output "C:\\path\\to\\out.xlsx"
 
-Sheets: 'Switch VLANs' (switch, port, VLAN, MAC address), 'Raw data' (every input line + outcome),
+Sheets: 'Switch VLANs' (switch, port, VLAN, MAC address, port status, port name), 'Raw data' (every input line + outcome),
 'Log' (skipped/odd lines, highlighted). Prints counts only, never rows.
 Keep --output outside this repo (it contains real data).
 """

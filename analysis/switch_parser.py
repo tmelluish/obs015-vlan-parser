@@ -1,5 +1,5 @@
 """Parse 'show int status' and 'show mac address-table' output captured from many switches
-into (switch, port, VLAN, MAC) rows. A port seen with several MACs gets one row per MAC;
+into (switch, port, VLAN, MAC, status, name) rows. A port seen with several MACs gets one row per MAC;
 a port with none gets one row with a blank MAC.
 
 Pure functions, no file or Excel I/O, so they can be tested on synthetic text.
@@ -64,6 +64,8 @@ class Row:
     vlan: str
     line_no: int
     mac: str = ""
+    status: str = ""
+    name: str = ""
 
 
 @dataclass
@@ -206,7 +208,9 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
         if key in seen:
             log(line_no, WARNING, f"duplicate port {m['port']} for this switch (kept)", line)
         seen.add(key)
-        res.rows.append(Row(switch, m["port"], m["vlan"], line_no))
+        res.rows.append(
+            Row(switch, m["port"], m["vlan"], line_no, "", m["status"], m["name"].strip())
+        )
         section_rows += 1
         mark("parsed")
 
@@ -241,7 +245,9 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
     expanded: list[Row] = []
     for r in res.rows:
         found = by_port.get((r.switch, r.port.lower()), [""])
-        expanded.extend(Row(r.switch, r.port, r.vlan, r.line_no, mac) for mac in found)
+        expanded.extend(
+            Row(r.switch, r.port, r.vlan, r.line_no, mac, r.status, r.name) for mac in found
+        )
     res.rows = expanded
 
 
