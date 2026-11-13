@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(//c/Users/Tom.Melluish/data/**)",
+      "Edit(//c/Users/Tom.Melluish/data/**)",
+      "Read(**/*.csv)",
+      "Read(**/*.xlsx)",
+      "Read(**/*.xls)",
+      "Read(**/*.parquet)",
+      "Read(**/*.sav)",
+      "Read(**/*.db)",
+      "Read(**/*.sqlite)",
+      "Read(**/.env)",
+      "Read(**/.env.*)"
+    ],
+    "ask": [
+      "Bash(python *)",
+      "Bash(uv *)",
+      "Bash(pip *)",
+      "Bash(curl *)",
+      "PowerShell(python *)",
+      "PowerShell(uv *)",
+      "PowerShell(pip *)",
+      "PowerShell(curl *)"
+    ]
+  }
+}

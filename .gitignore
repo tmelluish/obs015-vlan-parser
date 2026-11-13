@@ -1,0 +1,41 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Data: never commit
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.xlsm
+*.parquet
+*.feather
+*.sav
+*.dta
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+*.pickle
+*.json.gz
+data/
+output/
+outputs/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Notebooks: checkpoints (outputs are stripped by pre-commit)
+.ipynb_checkpoints/
+
+# Editor/OS
+.vscode/
+.DS_Store
+Thumbs.db
