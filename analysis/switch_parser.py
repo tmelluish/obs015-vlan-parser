@@ -1,4 +1,6 @@
-"""Parse 'show int status' output captured from many switches into (switch, port, VLAN) rows.
+"""Parse 'show int status' and 'show mac address-table' output captured from many switches
+into (switch, port, VLAN, MAC) rows. A port seen with several MACs gets one row per MAC;
+a port with none gets one row with a blank MAC.
 
 Pure functions, no file or Excel I/O, so they can be tested on synthetic text.
 Every input line gets an outcome and anything unusual gets a log entry, so nothing
@@ -18,7 +20,17 @@ PROMPT = re.compile(r"^(?P<switch>[\w.\-]+)#\s*(?P<cmd>.*)$")
 INT_STATUS = re.compile(r"^show\s+int(?:erfaces?)?\s+status$", re.IGNORECASE)
 # Lines that are known session noise, not data.
 NOISE = re.compile(r"^(?:-{2,}.*-{2,}|connection closed\.?)$", re.IGNORECASE)
+MAC_TABLE = re.compile(r"^show\s+mac[\s-]*address[\s-]*table(?:\s.*)?$", re.IGNORECASE)
 HEADER = re.compile(r"^Port\s+Name\s+Status\s+Vlan\b", re.IGNORECASE)
+MAC_HEADER = re.compile(
+    r"^(?:Vlan\s+Mac\s+Address\s+Type\s+Ports|Mac\s+Address\s+Table|Total\s+Mac\s+Addresses\b.*)",
+    re.IGNORECASE,
+)
+# 'All  aaaa.bbbb.cccc  STATIC  Gi1/0/1' (ports may be a comma-separated list)
+MAC_ROW = re.compile(
+    r"^(?P<vlan>\S+)\s+(?P<mac>[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s+\S+\s+(?P<ports>.+)$",
+    re.IGNORECASE,
+)
 PORT_START = re.compile(r"^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?\s")
 
 STATUSES = (
@@ -51,6 +63,16 @@ class Row:
     port: str
     vlan: str
     line_no: int
+    mac: str = ""
+
+
+@dataclass
+class MacEntry:
+    switch: str
+    port: str
+    mac: str
+    line_no: int
+    text: str
 
 
 @dataclass
@@ -85,12 +107,13 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
     res = ParseResult()
     switch = ""
     cmd = ""
-    in_status = False
+    kind = ""  # "status", "mac" or "" (other command)
     in_section = False
     section_start = 0
     section_lines = 0
     section_rows = 0
     seen: set[tuple[str, str]] = set()
+    macs: list[MacEntry] = []
 
     def log(line_no: int, level: str, message: str, line: str = "") -> None:
         res.log.append(LogEntry(line_no, level, switch, message, line))
@@ -98,13 +121,13 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
     def close_section() -> None:
         if not in_section:
             return
-        if in_status and section_rows == 0:
-            log(section_start, WARNING, "'show int status' section produced no port rows")
-        elif not in_status:
+        if kind and section_rows == 0:
+            log(section_start, WARNING, f"'{cmd}' section produced no rows")
+        elif not kind:
             log(
                 section_start,
                 INFO,
-                f"section skipped (command is not 'show int status'): '{cmd}' "
+                f"section skipped (not 'show int status' / 'show mac address-table'): '{cmd}' "
                 f"({section_lines} lines)",
             )
 
@@ -127,7 +150,7 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
             close_section()
             switch = prompt["switch"]
             cmd = " ".join(prompt["cmd"].split())
-            in_status = bool(INT_STATUS.match(cmd))
+            kind = "status" if INT_STATUS.match(cmd) else "mac" if MAC_TABLE.match(cmd) else ""
             in_section = True
             section_start, section_lines, section_rows = line_no, 0, 0
             mark("ignored")
@@ -144,8 +167,24 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
             mark("ignored")
             continue
 
-        if not in_status:
+        if not kind:
             mark("ignored")
+            continue
+
+        if kind == "mac":
+            if MAC_HEADER.match(line):
+                mark("header")
+                continue
+            mm = MAC_ROW.match(line)
+            if not mm:
+                log(line_no, SKIPPED, "unrecognised line inside MAC table section", line)
+                mark("skipped")
+                continue
+            for port in re.split(r"[,\s]+", mm["ports"].strip()):
+                if port:
+                    macs.append(MacEntry(switch, port, mm["mac"].lower(), line_no, line))
+            section_rows += 1
+            mark("parsed")
             continue
 
         if HEADER.match(line):
@@ -172,9 +211,38 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
         mark("parsed")
 
     close_section()
+    _attach_macs(res, macs)
     if progress:
         progress("Parsing", total, total)
     return res
+
+
+def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
+    """Expand res.rows to one row per (port, MAC); log MACs on ports not in 'int status'."""
+    by_port: dict[tuple[str, str], list[str]] = {}
+    known = {(r.switch, r.port.lower()) for r in res.rows}
+    for e in macs:
+        key = (e.switch, e.port.lower())
+        if key not in known:
+            res.log.append(
+                LogEntry(
+                    e.line_no,
+                    INFO,
+                    e.switch,
+                    f"MAC {e.mac} on port '{e.port}' not in this switch's 'int status' (e.g. CPU)",
+                    e.text,
+                )
+            )
+            continue
+        found = by_port.setdefault(key, [])
+        if e.mac not in found:
+            found.append(e.mac)
+
+    expanded: list[Row] = []
+    for r in res.rows:
+        found = by_port.get((r.switch, r.port.lower()), [""])
+        expanded.extend(Row(r.switch, r.port, r.vlan, r.line_no, mac) for mac in found)
+    res.rows = expanded
 
 
 def read_capture(path: str) -> str:

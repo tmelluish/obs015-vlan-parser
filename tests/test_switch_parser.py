@@ -75,7 +75,7 @@ def test_workbook_has_three_sheets(tmp_path):
     write_workbook(parse_text(SAMPLE), str(out))
     wb = load_workbook(out)
     assert wb.sheetnames == ["Switch VLANs", "Raw data", "Log"]
-    assert [c.value for c in wb["Switch VLANs"][1]] == ["switch", "port", "VLAN"]
+    assert [c.value for c in wb["Switch VLANs"][1]] == ["switch", "port", "VLAN", "MAC address"]
     assert wb["Switch VLANs"].max_row == 1 + 5
     assert wb["Raw data"].max_row == 1 + len(SAMPLE.splitlines())
 
@@ -92,3 +92,46 @@ def test_progress_callbacks_report_stages(tmp_path):
         "Writing 'Raw data'",
         "Saving file (can take a while)",
     } <= stages
+
+
+MAC_SAMPLE = """sw-a#Show int status
+Port         Name               Status       Vlan       Duplex  Speed Type
+Gi3/0/15     x                  connected    99         full   1000 SFP
+Gi3/0/19     y                  connected    99         full   1000 SFP
+Gi3/0/23     z                  notconnect   trunk      full   1000 SFP
+sw-a#show mac address-table
+          Mac Address Table
+-------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+ All    aaaa.bbbb.0001    STATIC      CPU
+  99    aaaa.bbbb.0002    STATIC      Gi3/0/15
+  99    AAAA.BBBB.0003    DYNAMIC     Gi3/0/19
+  10    aaaa.bbbb.0004    DYNAMIC     Gi3/0/19
+  20    aaaa.bbbb.0004    DYNAMIC     Gi3/0/19
+  20    aaaa.bbbb.0005    DYNAMIC     Gi3/0/15,Gi3/0/99
+not a mac row
+Total Mac Addresses for this criterion: 6
+"""
+
+
+def test_macs_attached_one_row_per_mac():
+    res = parse_text(MAC_SAMPLE)
+    got = [(r.port, r.vlan, r.mac) for r in res.rows]
+    assert got == [
+        ("Gi3/0/15", "99", "aaaa.bbbb.0002"),
+        ("Gi3/0/15", "99", "aaaa.bbbb.0005"),
+        ("Gi3/0/19", "99", "aaaa.bbbb.0003"),
+        ("Gi3/0/19", "99", "aaaa.bbbb.0004"),  # duplicate across VLANs collapsed
+        ("Gi3/0/23", "trunk", ""),  # no MAC seen: still listed
+    ]
+
+
+def test_unmatched_macs_and_bad_lines_are_logged():
+    res = parse_text(MAC_SAMPLE)
+    msgs = [e.message for e in res.log]
+    assert any("aaaa.bbbb.0001" in m and "CPU" in m for m in msgs)
+    assert any("Gi3/0/99" in m for m in msgs)
+    assert [e.level for e in res.log if "unrecognised" in e.message] == [SKIPPED]
+    assert len(res.raw) == len(MAC_SAMPLE.splitlines())

@@ -57,11 +57,11 @@ def write_workbook(res: ParseResult, path: str, progress: Progress | None = None
 
     ws = wb.active
     ws.title = "Switch VLANs"
-    ws.append(["switch", "port", "VLAN"])
+    ws.append(["switch", "port", "VLAN", "MAC address"])
     for i, r in enumerate(res.rows, start=1):
-        _append(ws, i + 1, [r.switch, r.port, r.vlan])
+        _append(ws, i + 1, [r.switch, r.port, r.vlan, r.mac])
         tick("Writing 'Switch VLANs'", i, len(res.rows))
-    _finish(ws, [28, 16, 12])
+    _finish(ws, [28, 16, 12, 18])
 
     ws = wb.create_sheet("Raw data")
     ws.append(["line", "text", "outcome"])
