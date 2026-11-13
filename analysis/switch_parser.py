@@ -8,12 +8,13 @@ is dropped silently.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # Colour codes, with or without the ESC byte (pasted text often loses it).
 ANSI = re.compile(r"(?:\x1b)?\[[0-9;]*m")
-# 'hostname#command ...' (the '#' stays part of the switch name, as in the requested output)
-PROMPT = re.compile(r"^(?P<switch>[\w.\-]+#)\s*(?P<cmd>.*)$")
+# 'hostname#command ...' (the '#' is the prompt character and is not part of the switch name)
+PROMPT = re.compile(r"^(?P<switch>[\w.\-]+)#\s*(?P<cmd>.*)$")
 INT_STATUS = re.compile(r"^show\s+int(?:erfaces?)?\s+status$", re.IGNORECASE)
 # Lines that are known session noise, not data.
 NOISE = re.compile(r"^(?:-{2,}.*-{2,}|connection closed\.?)$", re.IGNORECASE)
@@ -75,7 +76,12 @@ class ParseResult:
     log: list[LogEntry] = field(default_factory=list)
 
 
-def parse_text(text: str) -> ParseResult:
+# progress(stage, done, total) is called periodically by the long-running steps.
+Progress = Callable[[str, int, int], None]
+PROGRESS_EVERY = 2000
+
+
+def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
     res = ParseResult()
     switch = ""
     cmd = ""
@@ -102,7 +108,11 @@ def parse_text(text: str) -> ParseResult:
                 f"({section_lines} lines)",
             )
 
-    for line_no, raw in enumerate(text.splitlines(), start=1):
+    lines = text.splitlines()
+    total = len(lines)
+    for line_no, raw in enumerate(lines, start=1):
+        if progress and line_no % PROGRESS_EVERY == 0:
+            progress("Parsing", line_no, total)
         line = ANSI.sub("", raw).strip()
 
         def mark(outcome: str, raw: str = raw, line_no: int = line_no) -> None:
@@ -162,6 +172,8 @@ def parse_text(text: str) -> ParseResult:
         mark("parsed")
 
     close_section()
+    if progress:
+        progress("Parsing", total, total)
     return res
 
 

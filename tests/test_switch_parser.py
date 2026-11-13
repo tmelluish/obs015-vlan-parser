@@ -33,11 +33,11 @@ def test_rows_extracted_with_all_statuses():
     res = parse_text(SAMPLE)
     got = [(r.switch, r.port, r.vlan) for r in res.rows]
     assert got == [
-        ("sw-aaa-01#", "Te1/0/1", "trunk"),
-        ("sw-aaa-01#", "Te1/0/2", "99"),
-        ("sw-aaa-01#", "Te1/0/3", "1"),
-        ("sw-aaa-01#", "Gi2/0/1", "4094"),
-        ("sw-bbb-02#", "Te1/0/1", "20"),
+        ("sw-aaa-01", "Te1/0/1", "trunk"),
+        ("sw-aaa-01", "Te1/0/2", "99"),
+        ("sw-aaa-01", "Te1/0/3", "1"),
+        ("sw-aaa-01", "Gi2/0/1", "4094"),
+        ("sw-bbb-02", "Te1/0/1", "20"),
     ]
 
 
@@ -63,7 +63,9 @@ def test_empty_status_section_and_duplicates_warn():
     res = parse_text("s1#show int status\ns2#show int status\nTe1/0/1 a connected 1 full 1000 x\n")
     warns = [e for e in res.log if e.level == WARNING]
     assert len(warns) == 1  # s1 had no rows
-    dup = parse_text("s#show int status\nTe1/0/1 a connected 1 f 1 x\nTe1/0/1 a connected 1 f 1 x\n")
+    dup = parse_text(
+        "s#show int status\nTe1/0/1 a connected 1 f 1 x\nTe1/0/1 a connected 1 f 1 x\n"
+    )
     assert len(dup.rows) == 2
     assert any("duplicate" in e.message for e in dup.log)
 
@@ -76,3 +78,17 @@ def test_workbook_has_three_sheets(tmp_path):
     assert [c.value for c in wb["Switch VLANs"][1]] == ["switch", "port", "VLAN"]
     assert wb["Switch VLANs"].max_row == 1 + 5
     assert wb["Raw data"].max_row == 1 + len(SAMPLE.splitlines())
+
+
+def test_progress_callbacks_report_stages(tmp_path):
+    big = "s#show int status\n" + "Te1/0/1 a connected 1 full 1000 x\n" * 4500
+    calls = []
+    res = parse_text(big, lambda *a: calls.append(a))
+    assert calls[-1] == ("Parsing", 4501, 4501)
+    write_workbook(res, str(tmp_path / "o.xlsx"), lambda *a: calls.append(a))
+    stages = {c[0] for c in calls}
+    assert {
+        "Writing 'Switch VLANs'",
+        "Writing 'Raw data'",
+        "Saving file (can take a while)",
+    } <= stages
