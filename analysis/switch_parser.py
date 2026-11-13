@@ -14,7 +14,45 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # Colour codes, with or without the ESC byte (pasted text often loses it).
-ANSI = re.compile(r"(?:\x1b)?\[[0-9;]*m")
+CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\[[0-9;]*m")
+# Leftover control characters (not tab). Backspace is replayed by clean_line before this.
+CONTROL = re.compile(r"[\x00-\x07\x0b-\x1f\x7f]")
+
+
+def clean_line(raw: str) -> str:
+    """Render a captured terminal line as plain text.
+
+    Strips escape sequences, replays backspaces the way a terminal does (cursor moves left,
+    typed characters overwrite), drops other control characters and trailing whitespace.
+    """
+    s = CSI.sub("", raw)
+    if "\b" in s:
+        buf: list[str] = []
+        cur = 0
+        for ch in s:
+            if ch == "\b":
+                cur = max(0, cur - 1)
+                continue
+            if cur < len(buf):
+                buf[cur] = ch
+            else:
+                buf.append(ch)
+            cur += 1
+        s = "".join(buf)
+    return CONTROL.sub("", s).rstrip()
+
+
+def split_lines(text: str) -> list[str]:
+    """Split on newlines only (str.splitlines also splits on odd control characters),
+    so line numbers match what an editor shows."""
+    if not text:
+        return []
+    lines = [ln.removesuffix("\r") for ln in text.split("\n")]
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 # 'hostname#command ...' (the '#' is the prompt character and is not part of the switch name)
 PROMPT = re.compile(r"^(?P<switch>[\w.\-]+)#\s*(?P<cmd>.*)$")
 INT_STATUS = re.compile(r"^show\s+int(?:erfaces?)?\s+status$", re.IGNORECASE)
@@ -105,8 +143,49 @@ Progress = Callable[[str, int, int], None]
 PROGRESS_EVERY = 2000
 
 
-def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
+MODES = ("regex", "fixed")
+# Header words whose start positions define the fixed-width columns of 'show int status'.
+HEADER_WORDS = ("Port", "Name", "Status", "Vlan", "Duplex")
+
+
+def header_columns(header: str) -> list[int] | None:
+    """Start offsets of the Port/Name/Status/Vlan/Duplex columns in a header line."""
+    pos, start = [], 0
+    for word in HEADER_WORDS:
+        i = header.find(word, start)
+        if i < 0:
+            return None
+        pos.append(i)
+        start = i + len(word)
+    return pos
+
+
+def fixed_fields(line: str, cols: list[int]) -> tuple[str, str, str, str] | None:
+    """Slice a row by header offsets -> (port, name, status, vlan), or None if misaligned.
+
+    Each column start must be preceded by a space (or lie past the end of the line),
+    otherwise some value spans the boundary and the row doesn't line up with the header.
+    """
+    for c in cols[1:]:
+        if c <= len(line) and line[c - 1] != " ":
+            return None
+    port = line[: cols[1]].strip()
+    name = line[cols[1] : cols[2]].strip()
+    status = line[cols[2] : cols[3]].strip()
+    vlan = line[cols[3] : cols[4]].strip()
+    if not (port and status and vlan) or any(" " in v for v in (port, status, vlan)):
+        return None
+    return port, name, status, vlan
+
+
+def parse_text(text: str, progress: Progress | None = None, mode: str = "regex") -> ParseResult:
+    """mode 'regex': anchor on known status words (tolerates misaligned columns).
+    mode 'fixed': slice 'show int status' rows at the column offsets of the header line.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
     res = ParseResult()
+    cols: list[int] | None = None
     switch = ""
     cmd = ""
     kind = ""  # "status", "mac" or "" (other command)
@@ -133,12 +212,13 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
                 f"({section_lines} lines)",
             )
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     total = len(lines)
     for line_no, raw in enumerate(lines, start=1):
         if progress and line_no % PROGRESS_EVERY == 0:
             progress("Parsing", line_no, total)
-        line = ANSI.sub("", raw).strip()
+        clean = clean_line(raw)
+        line = clean.strip()
 
         def mark(outcome: str, raw: str = raw, line_no: int = line_no) -> None:
             res.raw.append(RawLine(line_no, raw, outcome))
@@ -154,6 +234,7 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
             cmd = " ".join(prompt["cmd"].split())
             kind = "status" if INT_STATUS.match(cmd) else "mac" if MAC_TABLE.match(cmd) else ""
             in_section = True
+            cols = None
             section_start, section_lines, section_rows = line_no, 0, 0
             mark("ignored")
             continue
@@ -190,6 +271,10 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
             continue
 
         if HEADER.match(line):
+            if mode == "fixed":
+                cols = header_columns(clean)
+                if cols is None:
+                    log(line_no, WARNING, "header lacks Port/Name/Status/Vlan/Duplex", line)
             mark("header")
             continue
 
@@ -198,19 +283,27 @@ def parse_text(text: str, progress: Progress | None = None) -> ParseResult:
             mark("skipped")
             continue
 
-        m = ROW.match(line)
-        if not m:
-            log(line_no, SKIPPED, "port row but no known status word / VLAN found", line)
-            mark("skipped")
-            continue
+        if mode == "fixed":
+            fields = fixed_fields(clean, cols) if cols else None
+            if fields is None:
+                why = "no usable header above row" if not cols else "row not aligned with header"
+                log(line_no, SKIPPED, f"fixed-width: {why}", line)
+                mark("skipped")
+                continue
+            port, name, status, vlan = fields
+        else:
+            m = ROW.match(line)
+            if not m:
+                log(line_no, SKIPPED, "port row but no known status word / VLAN found", line)
+                mark("skipped")
+                continue
+            port, name, status, vlan = m["port"], m["name"].strip(), m["status"], m["vlan"]
 
-        key = (switch, m["port"])
+        key = (switch, port)
         if key in seen:
-            log(line_no, WARNING, f"duplicate port {m['port']} for this switch (kept)", line)
+            log(line_no, WARNING, f"duplicate port {port} for this switch (kept)", line)
         seen.add(key)
-        res.rows.append(
-            Row(switch, m["port"], m["vlan"], line_no, "", m["status"], m["name"].strip())
-        )
+        res.rows.append(Row(switch, port, vlan, line_no, "", status, name))
         section_rows += 1
         mark("parsed")
 

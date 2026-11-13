@@ -3,7 +3,7 @@
 from openpyxl import load_workbook
 
 from analysis.switch_excel import write_workbook
-from analysis.switch_parser import SKIPPED, WARNING, parse_text
+from analysis.switch_parser import INFO, SKIPPED, WARNING, clean_line, parse_text
 
 SAMPLE = """\
 \x1b[0m\x1b[33mConnection closed.
@@ -153,3 +153,82 @@ def test_status_and_name_captured():
         ("Te1/0/3", "notconnect", ""),
         ("Gi2/0/1", "disabled", "uplink disabled x"),
     ]
+
+
+def _fw(port, name, status, vlan, duplex="full", tail="1000 SFP"):
+    return f"{port:<10}{name:<19}{status:<13}{vlan:<11}{duplex:<8}{tail}"
+
+
+FIXED_SAMPLE = "\n".join(
+    [
+        "sw-f#show int status",
+        _fw("Port", "Name", "Status", "Vlan", "Duplex", "Speed Type"),
+        _fw("Te1/0/1", "BTCM Link to skfl-", "connected", "trunk"),
+        _fw("Te1/0/2", "", "linkFlapE", "99"),
+        _fw("Te1/0/3", "disabled by hand", "notconnect", "1"),
+        _fw("Te1/0/4", "x", "connected", "5").replace("connected", "conn  ected  "),
+        "Te1/0/5 misaligned connected 7 full 1000 SFP",
+        _fw("Port", "Name", "Status", "Vlan", "Duplex", "Speed Type"),
+        _fw("Te1/0/6", "repeated hdr", "connected", "42"),
+    ]
+)
+
+
+def test_fixed_mode_slices_by_header_columns():
+    res = parse_text(FIXED_SAMPLE, mode="fixed")
+    got = [(r.port, r.vlan, r.status, r.name) for r in res.rows]
+    assert got == [
+        ("Te1/0/1", "trunk", "connected", "BTCM Link to skfl-"),
+        ("Te1/0/2", "99", "linkFlapE", ""),  # unknown status word is fine in fixed mode
+        ("Te1/0/3", "1", "notconnect", "disabled by hand"),
+        ("Te1/0/6", "42", "connected", "repeated hdr"),
+    ]
+    skipped = [e for e in res.log if e.level == SKIPPED]
+    assert len(skipped) == 2  # the garbled row and the misaligned row
+
+
+def test_fixed_mode_row_without_header_is_logged():
+    res = parse_text("s#show int status\nTe1/0/1 a connected 1 full 1000 x\n", mode="fixed")
+    assert res.rows == []
+    assert any("no usable header" in e.message for e in res.log)
+
+
+def test_unknown_mode_rejected():
+    import pytest
+
+    with pytest.raises(ValueError):
+        parse_text("", mode="nope")
+
+
+# Terminal echo of typing "show ap upt", erasing 6 chars, typing "int stats", erasing 1, "us".
+ERASE = "\b \b"
+GARBLED_CMD = "show ap upt" + ERASE * 6 + "int stats" + ERASE + "us"
+EDITED_SAMPLE = "\n".join(
+    [
+        "sw-name#" + GARBLED_CMD,
+        "",
+        "Port      Name               Status       Vlan       Duplex  Speed Type",
+        "Gi1/0/1   Connected to Prima notconnect   1            auto   auto 10/100/1000BaseTX",
+        "Gi1/0/2   User access        notconnect   99           auto   auto 10/100/1000BaseTX",
+        "Gi1/0/5   Connected to PRI S connected    trunk      a-full a-1000 10/100/1000BaseTX",
+        "",
+    ]
+)
+
+
+def test_clean_line_replays_backspaces():
+    assert clean_line("sw-name#" + GARBLED_CMD) == "sw-name#show int status"
+    assert clean_line("\x1b[0m\x1b[33mabc\x1b[K\x07") == "abc"
+
+
+def test_backspace_edited_command_still_parsed_in_both_modes():
+    for mode in ("regex", "fixed"):
+        res = parse_text(EDITED_SAMPLE, mode=mode)
+        got = [(r.switch, r.port, r.vlan, r.status, r.name) for r in res.rows]
+        assert got == [
+            ("sw-name", "Gi1/0/1", "1", "notconnect", "Connected to Prima"),
+            ("sw-name", "Gi1/0/2", "99", "notconnect", "User access"),
+            ("sw-name", "Gi1/0/5", "trunk", "connected", "Connected to PRI S"),
+        ], mode
+        assert not [e for e in res.log if e.level != INFO or "skipped" in e.message]
+        assert len(res.raw) == 6  # one per editor line (the trailing newline adds none)

@@ -12,7 +12,7 @@ import sys
 from collections import Counter
 
 from analysis.switch_excel import write_workbook
-from analysis.switch_parser import parse_text, read_capture
+from analysis.switch_parser import MODES, parse_text, read_capture
 
 _last_stage = ""
 
@@ -34,14 +34,21 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--input", required=True, help="path to the text capture")
     p.add_argument("--output", required=True, help="path of the .xlsx to write")
+    p.add_argument(
+        "--mode",
+        choices=MODES,
+        default="regex",
+        help="regex: anchor on status words (default); fixed: slice columns by header offsets",
+    )
     args = p.parse_args()
 
     print("Reading input...")
     text = read_capture(args.input)
-    res = parse_text(text, show_progress)
+    res = parse_text(text, show_progress, args.mode)
     write_workbook(res, args.output, show_progress)
     print()
 
+    print(f"mode: {args.mode}")
     print(f"input lines: {len(res.raw)}")
     print(f"switches with ports: {len({r.switch for r in res.rows})}")
     print(f"output rows: {len(res.rows)}")
