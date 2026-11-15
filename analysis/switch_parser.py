@@ -1,6 +1,6 @@
 """Parse 'show int status' and 'show mac address-table' output captured from many switches
-into (switch, port, VLAN, MAC, status, name) rows. A port seen with several MACs gets one row per MAC;
-a port with none gets one row with a blank MAC.
+into one row per port: (switch, port, VLAN, status, name, MAC count, MACs). MACs seen on a port
+are joined into one comma-and-space-separated cell; a port with none has a blank list and a count of 0.
 
 Pure functions, no file or Excel I/O, so they can be tested on synthetic text.
 Every input line gets an outcome and anything unusual gets a log entry, so nothing
@@ -103,9 +103,10 @@ class Row:
     port: str
     vlan: str
     line_no: int
-    mac: str = ""
+    macs: str = ""  # comma-joined, sorted MACs seen on the port
     status: str = ""
     name: str = ""
+    mac_count: int = 0  # true number of MACs, even if the list was truncated
 
 
 @dataclass
@@ -203,7 +204,7 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
                 row that doesn't line up with its header is skipped and logged.
 
     Returns:
-        ParseResult with rows (one per port/MAC), raw (every input line with its
+        ParseResult with rows (one per port), raw (every input line with its
         outcome) and log (anything skipped or unusual).
 
     Raises:
@@ -366,16 +367,45 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
     return res
 
 
+# Excel allows 32,767 characters per cell; stay under the writer's own 32,000 cap.
+MAC_CELL_LIMIT = 32000
+# Separator for the MAC and VLAN lists in a cell.
+LIST_SEP = ", "
+
+
+def _join_macs(macs: list[str]) -> tuple[str, int]:
+    """Join MACs with LIST_SEP; if too long for a cell, keep whole MACs that fit and end with
+    LIST_SEP + '...'.
+
+    Returns (text, number of MACs included).
+    """
+    text = LIST_SEP.join(macs)
+    if len(text) <= MAC_CELL_LIMIT:
+        return text, len(macs)
+    kept: list[str] = []
+    used = 0
+    for m in macs:
+        extra = len(m) + (len(LIST_SEP) if kept else 0)
+        if used + extra > MAC_CELL_LIMIT - len(LIST_SEP + "..."):
+            break
+        kept.append(m)
+        used += extra
+    return LIST_SEP.join(kept) + LIST_SEP + "...", len(kept)
+
+
 def _vlan_sort_key(vlan: str) -> tuple[int, int, str]:
     """Numeric VLANs in numeric order, then anything else (e.g. 'All') alphabetically."""
     return (0, int(vlan), "") if vlan.isdigit() else (1, 0, vlan.lower())
 
 
 def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
-    """Expand res.rows to one row per (port, MAC); log MACs on ports not in 'int status'.
+    """Add each port's sorted MAC list and VLAN list to res.rows (still one row per port).
+
+    MACs on ports not in 'int status' (e.g. CPU) are logged instead. A MAC list too long for an
+    Excel cell is truncated with a WARNING; mac_count always holds the true total.
 
     'show int status' gives only a word such as 'trunk' for ports carrying many VLANs. When a
-    port's VLAN is not a plain number, it is replaced by the sorted, comma-joined VLANs seen
+    port's VLAN is not a plain number, it is replaced by the sorted, comma-joined (LIST_SEP) VLANs seen
     on that port in the MAC table (the same list on every row for the port). If the MAC table
     shows none, the original value is kept and a WARNING is logged.
     """
@@ -408,7 +438,7 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
         if not vlan.isdigit():
             seen_vlans = vlans_by_port.get(key)
             if seen_vlans:
-                vlan = ",".join(sorted(seen_vlans, key=_vlan_sort_key))
+                vlan = LIST_SEP.join(sorted(seen_vlans, key=_vlan_sort_key))
             else:
                 res.log.append(
                     LogEntry(
@@ -420,10 +450,20 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
                         "",
                     )
                 )
-        found = by_port.get(key, [""])
-        expanded.extend(
-            Row(r.switch, r.port, vlan, r.line_no, mac, r.status, r.name) for mac in found
-        )
+        found = sorted(by_port.get(key, []))
+        text, kept = _join_macs(found)
+        if kept < len(found):
+            res.log.append(
+                LogEntry(
+                    r.line_no,
+                    WARNING,
+                    r.switch,
+                    f"port {r.port}: {len(found)} MACs exceed the Excel cell limit; list "
+                    f"truncated to {kept} (MAC count column shows the true total)",
+                    "",
+                )
+            )
+        expanded.append(Row(r.switch, r.port, vlan, r.line_no, text, r.status, r.name, len(found)))
     res.rows = expanded
 
 
@@ -450,6 +490,7 @@ def build_summary(
         ("switches with ports", len({r.switch for r in res.rows})),
         ("output rows", len(res.rows)),
         ("distinct ports", len({(r.switch, r.port) for r in res.rows})),
-        ("rows with a MAC", sum(1 for r in res.rows if r.mac)),
+        ("ports with a MAC", sum(1 for r in res.rows if r.mac_count)),
+        ("MAC addresses seen on ports", sum(r.mac_count for r in res.rows)),
         *((f"log {lvl}", log_counts.get(lvl, 0)) for lvl in (SKIPPED, WARNING, INFO)),
     ]

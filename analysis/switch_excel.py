@@ -62,11 +62,11 @@ def write_workbook(
 
     ws = wb.active
     ws.title = "Switch VLANs"
-    ws.append(["switch", "port", "VLAN", "MAC address", "port status", "port name"])
+    ws.append(["switch", "port", "VLAN", "port status", "port name", "MAC count", "MAC addresses"])
     for i, r in enumerate(res.rows, start=1):
-        _append(ws, i + 1, [r.switch, r.port, r.vlan, r.mac, r.status, r.name])
+        _append(ws, i + 1, [r.switch, r.port, r.vlan, r.status, r.name, r.mac_count, r.macs])
         tick("Writing 'Switch VLANs'", i, len(res.rows))
-    _finish(ws, [28, 16, 12, 18, 14, 30])
+    _finish(ws, [28, 16, 14, 14, 30, 11, 60])
 
     ws = wb.create_sheet("Raw data")
     ws.append(["line", "text", "outcome"])

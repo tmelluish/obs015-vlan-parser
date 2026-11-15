@@ -3,7 +3,7 @@
 from openpyxl import load_workbook
 
 from analysis.switch_excel import write_workbook
-from analysis.switch_parser import SKIPPED, WARNING, clean_line, parse_text
+from analysis.switch_parser import MAC_CELL_LIMIT, SKIPPED, WARNING, clean_line, parse_text
 
 SAMPLE = """\
 \x1b[0m\x1b[33mConnection closed.
@@ -79,9 +79,10 @@ def test_workbook_has_three_sheets(tmp_path):
         "switch",
         "port",
         "VLAN",
-        "MAC address",
         "port status",
         "port name",
+        "MAC count",
+        "MAC addresses",
     ]
     assert wb["Switch VLANs"].max_row == 1 + 5
     assert wb["Raw data"].max_row == 1 + len(SAMPLE.splitlines())
@@ -123,15 +124,13 @@ Total Mac Addresses for this criterion: 6
 """
 
 
-def test_macs_attached_one_row_per_mac():
+def test_macs_joined_into_one_sorted_list_per_port():
     res = parse_text(MAC_SAMPLE)
-    got = [(r.port, r.vlan, r.mac) for r in res.rows]
+    got = [(r.port, r.vlan, r.mac_count, r.macs) for r in res.rows]
     assert got == [
-        ("Gi3/0/15", "99", "aaaa.bbbb.0002"),
-        ("Gi3/0/15", "99", "aaaa.bbbb.0005"),
-        ("Gi3/0/19", "99", "aaaa.bbbb.0003"),
-        ("Gi3/0/19", "99", "aaaa.bbbb.0004"),  # duplicate across VLANs collapsed
-        ("Gi3/0/23", "trunk", ""),  # no MAC seen: still listed
+        ("Gi3/0/15", "99", 2, "aaaa.bbbb.0002, aaaa.bbbb.0005"),
+        ("Gi3/0/19", "99", 2, "aaaa.bbbb.0003, aaaa.bbbb.0004"),  # duplicate across VLANs collapsed
+        ("Gi3/0/23", "trunk", 0, ""),  # no MAC seen: still listed
     ]
 
 
@@ -251,6 +250,7 @@ def test_summary_sheet_has_run_details_and_counts(tmp_path):
     assert got["run date/time"] == "2026-11-13 14:05:09"
     assert got["source file"] == "in.txt"
     assert got["output rows"] == len(res.rows) == 5
+    assert got["ports with a MAC"] == 0
     assert got["switches with ports"] == 2
     assert got["log SKIPPED"] == 2
     assert got["log WARNING"] == 1  # Te1/0/1 is a trunk with no MAC table data
@@ -274,14 +274,11 @@ Vlan    Mac Address       Type        Ports
 """
 
 
-def test_trunk_vlan_replaced_by_sorted_list_on_every_row():
+def test_trunk_vlan_replaced_by_sorted_vlan_list():
     res = parse_text(TRUNK_SAMPLE)
-    trunk_rows = [(r.vlan, r.mac) for r in res.rows if r.port == "Gi1/0/1"]
+    trunk_rows = [(r.vlan, r.mac_count, r.macs) for r in res.rows if r.port == "Gi1/0/1"]
     assert trunk_rows == [
-        ("5,20,100", "aaaa.bbbb.0001"),
-        ("5,20,100", "aaaa.bbbb.0002"),
-        ("5,20,100", "aaaa.bbbb.0003"),
-        ("5,20,100", "aaaa.bbbb.0004"),
+        ("5, 20, 100", 4, "aaaa.bbbb.0001, aaaa.bbbb.0002, aaaa.bbbb.0003, aaaa.bbbb.0004")
     ]
 
 
@@ -298,3 +295,18 @@ def test_trunk_without_mac_vlans_keeps_value_and_warns():
     warns = [e for e in res.log if e.level == WARNING]
     assert len(warns) == 1
     assert "Gi1/0/3" in warns[0].message and "trunk" in warns[0].message
+
+
+def test_overlong_mac_list_is_truncated_with_warning_and_true_count():
+    n = 2500  # 2,500 x 14 chars + commas is well over the 32,000-character cell limit
+    macs = [f"aaaa.bbbb.{i:04x}" for i in range(n)]
+    head = ["s#show int status", "Te1/0/1 a connected 1 full 1000 x", "s#show mac address-table"]
+    text = "\n".join(head + [f" 1 {m} DYNAMIC Te1/0/1" for m in macs]) + "\n"
+    res = parse_text(text)
+    (row,) = res.rows
+    assert row.mac_count == n
+    assert len(row.macs) <= MAC_CELL_LIMIT and row.macs.endswith(", ...")
+    kept = row.macs.removesuffix(", ...").split(", ")
+    assert kept == macs[: len(kept)] and 0 < len(kept) < n  # whole MACs only, sorted
+    warns = [e for e in res.log if e.level == WARNING]
+    assert len(warns) == 1 and "truncated" in warns[0].message
