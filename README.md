@@ -51,6 +51,7 @@ The terminal shows progress and then a summary of counts only (never rows).
 | Sheet | Contents |
 | --- | --- |
 | Switch VLANs | One row per port: switch, port, VLAN, port status, port name, MAC count, MAC addresses |
+| VLANs | One row per distinct numeric VLAN: VLAN, and the switches where it was seen (comma-separated) |
 | Raw data | Every input line with how it was handled (parsed, header, blank, noise, ignored, skipped) |
 | Log | Lines that were skipped or look odd, highlighted by level (SKIPPED, WARNING, INFO) |
 | Summary | Run date/time, source and output file paths, mode, and aggregate counts |

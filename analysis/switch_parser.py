@@ -467,6 +467,24 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
     res.rows = expanded
 
 
+def vlan_switches(res: ParseResult) -> list[tuple[str, str]]:
+    """One (VLAN, switches) pair per distinct numeric VLAN in res.rows.
+
+    VLAN cells holding a list ('5, 20, 100') count once per VLAN; non-numeric values left over
+    from 'show int status' (e.g. 'trunk') are ignored. VLANs are in numeric order and each
+    switch list is alphabetical (case-insensitive), joined with LIST_SEP.
+    """
+    switches_by_vlan: dict[str, set[str]] = {}
+    for r in res.rows:
+        for v in r.vlan.split(LIST_SEP):
+            if v.isdigit():
+                switches_by_vlan.setdefault(v, set()).add(r.switch)
+    return [
+        (v, LIST_SEP.join(sorted(switches_by_vlan[v], key=str.lower)))
+        for v in sorted(switches_by_vlan, key=int)
+    ]
+
+
 def read_capture(path: str) -> str:
     """Read a text capture, coping with UTF-16 (PowerShell redirects) and stray bytes."""
     with open(path, "rb") as f:

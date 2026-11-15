@@ -3,7 +3,14 @@
 from openpyxl import load_workbook
 
 from analysis.switch_excel import write_workbook
-from analysis.switch_parser import MAC_CELL_LIMIT, SKIPPED, WARNING, clean_line, parse_text
+from analysis.switch_parser import (
+    MAC_CELL_LIMIT,
+    SKIPPED,
+    WARNING,
+    clean_line,
+    parse_text,
+    vlan_switches,
+)
 
 SAMPLE = """\
 \x1b[0m\x1b[33mConnection closed.
@@ -70,11 +77,41 @@ def test_empty_status_section_and_duplicates_warn():
     assert any("duplicate" in e.message for e in dup.log)
 
 
-def test_workbook_has_three_sheets(tmp_path):
+def test_vlan_switches_numeric_only_sorted_and_split():
+    text = TRUNK_SAMPLE + (
+        "Sw-B#show int status\n"
+        "Port         Name               Status       Vlan       Duplex  Speed Type\n"
+        "Gi1/0/1      a                  connected    10           full   1000 SFP\n"
+        "Gi1/0/2      b                  connected    trunk        full   1000 SFP\n"
+        "sw-a#show int status\n"
+        "Port         Name               Status       Vlan       Duplex  Speed Type\n"
+        "Gi1/0/1      a                  connected    10           full   1000 SFP\n"
+    )
+    assert vlan_switches(parse_text(text)) == [
+        ("5", "sw-t"),
+        ("10", "sw-a, Sw-B"),  # sw-t's MAC on VLAN 10 is on an access port that stays on 99
+        ("20", "sw-t"),
+        ("30", "sw-t"),
+        ("99", "sw-t"),
+        ("100", "sw-t"),
+    ]  # 'trunk' (no MAC VLANs) is not listed
+
+
+def test_vlans_sheet_follows_switch_vlans(tmp_path):
+    out = tmp_path / "o.xlsx"
+    write_workbook(parse_text(TRUNK_SAMPLE), str(out))
+    wb = load_workbook(out)
+    assert wb.sheetnames[:2] == ["Switch VLANs", "VLANs"]
+    rows = list(wb["VLANs"].values)
+    assert rows[0] == ("VLAN", "switches")
+    assert rows[1] == ("5", "sw-t")
+
+
+def test_workbook_has_four_sheets(tmp_path):
     out = tmp_path / "out.xlsx"
     write_workbook(parse_text(SAMPLE), str(out))
     wb = load_workbook(out)
-    assert wb.sheetnames == ["Switch VLANs", "Raw data", "Log"]  # no summary passed
+    assert wb.sheetnames == ["Switch VLANs", "VLANs", "Raw data", "Log"]  # no summary passed
     assert [c.value for c in wb["Switch VLANs"][1]] == [
         "switch",
         "port",

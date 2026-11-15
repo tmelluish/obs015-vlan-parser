@@ -1,4 +1,4 @@
-"""Write a ParseResult to a four-sheet Excel workbook (the last sheet is the run summary)."""
+"""Write a ParseResult to an Excel workbook (the last sheet is the optional run summary)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from analysis.switch_parser import INFO, PROGRESS_EVERY, SKIPPED, WARNING, ParseResult, Progress
+from analysis.switch_parser import (
+    INFO,
+    PROGRESS_EVERY,
+    SKIPPED,
+    WARNING,
+    ParseResult,
+    Progress,
+    vlan_switches,
+)
 
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 HEADER_FONT = Font(bold=True)
@@ -67,6 +75,15 @@ def write_workbook(
         _append(ws, i + 1, [r.switch, r.port, r.vlan, r.status, r.name, r.mac_count, r.macs])
         tick("Writing 'Switch VLANs'", i, len(res.rows))
     _finish(ws, [28, 16, 14, 14, 30, 11, 60])
+
+    ws = wb.create_sheet("VLANs")
+    ws.append(["VLAN", "switches"])
+    pairs = vlan_switches(res)
+    for i, (vlan, switches) in enumerate(pairs, start=1):
+        _append(ws, i + 1, [vlan, switches])
+        ws.cell(row=i + 1, column=1).alignment = Alignment(horizontal="left")
+        tick("Writing 'VLANs'", i, len(pairs))
+    _finish(ws, [10, 90])
 
     ws = wb.create_sheet("Raw data")
     ws.append(["line", "text", "outcome"])
