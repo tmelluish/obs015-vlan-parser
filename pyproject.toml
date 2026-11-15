@@ -1,9 +1,9 @@
 [project]
-name = "auto-balls"
+name = "obs015-vlan-parser"
 version = "0.1.0"
+description = "Turn multi-switch 'show int status' / 'show mac address-table' captures into an Excel VLAN-per-port report"
 requires-python = ">=3.11,<3.15"
 dependencies = [
-    "pandas",
     "openpyxl",
 ]
 

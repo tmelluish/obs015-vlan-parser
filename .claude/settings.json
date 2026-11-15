@@ -1,8 +1,6 @@
 {
   "permissions": {
     "deny": [
-      "Read(//c/Users/Tom.Melluish/data/**)",
-      "Edit(//c/Users/Tom.Melluish/data/**)",
       "Read(**/*.csv)",
       "Read(**/*.xlsx)",
       "Read(**/*.xls)",

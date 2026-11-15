@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(//c/Users/<user-name>/data/**)",
+      "Edit(//c/Users/<user-name>/data/**)"
+    ]
+  }
+}

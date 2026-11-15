@@ -35,6 +35,9 @@ outputs/
 # Notebooks: checkpoints (outputs are stripped by pre-commit)
 .ipynb_checkpoints/
 
+# Claude Code personal settings (shared settings stay in .claude/settings.json)
+.claude/settings.local.json
+
 # Editor/OS
 .vscode/
 .DS_Store
