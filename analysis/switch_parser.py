@@ -181,33 +181,32 @@ def fixed_fields(line: str, cols: list[int]) -> tuple[str, str, str, str] | None
 
 
 def parse_text(text: str, progress: Progress | None = None, mode: str = "regex") -> ParseResult:
-    """mode 'regex': anchor on known status words (tolerates misaligned columns).
-    mode 'fixed': slice 'show int status' rows at the column offsets of the header line.
+    """Parse a multi-switch capture into port rows, a raw-line record and a log.
 
-    Section detection
-    -----------------
-    The capture is a flat stream of lines from many switches. A line shaped like
-    'hostname#command' (PROMPT) starts a new section and ends the previous one; every
-    following line belongs to that section until the next prompt. The hostname (without
-    the '#') becomes the switch name for all rows in the section. The command, with
-    whitespace collapsed, decides how the section's lines are read (`kind`):
+    Args:
+        text: the whole capture as one string.
+        progress: optional callback, called as progress("Parsing", lines_done, lines_total)
+            every PROGRESS_EVERY lines and once more at the end. It is only used to report
+            how far through the file the parser is (counts, never content); pass None
+            to run silently.
+        mode: how the fields of each 'show int status' row are located. It has no effect
+            on 'show mac address-table' rows, which are read the same way in both modes.
 
-      'status'  command is 'show int status'          -> rows become Port/VLAN/status/name
-      'mac'     command is 'show mac address-table'   -> rows become MAC entries
-      ''        any other command                     -> lines are ignored, and one INFO
-                                                         entry records the skipped section
+            "regex" (default): the Name column can contain spaces or be empty, so the row
+                is matched from the status word onwards (connected, notconnect, ...); the
+                token after it is the VLAN. Tolerates columns that don't line up, but a
+                status word that isn't in STATUSES is treated as unparseable and skipped.
+            "fixed": assumes fixed-width columns. The start offsets of Port, Name, Status,
+                Vlan and Duplex are read from the most recent header line in the section,
+                and each row is sliced at those offsets. Accepts any status word, but a
+                row that doesn't line up with its header is skipped and logged.
 
-    Each line is first rendered to plain text by clean_line (escape codes stripped,
-    backspaces replayed), so an edited command line is matched as typed. Within a
-    section, blank lines, session noise (dashed banners, 'Connection closed.') and
-    column headers are recognised and set aside. Anything else that doesn't parse is
-    logged as SKIPPED, so no line is dropped silently. A section with a recognised
-    command that yields no rows logs a WARNING. Non-noise text before the first prompt is
-    outside any section and is logged as INFO.
+    Returns:
+        ParseResult with rows (one per port/MAC), raw (every input line with its
+        outcome) and log (anything skipped or unusual).
 
-    Because the MAC table can appear before or after 'show int status' for the same
-    switch, MACs are collected during the pass and attached to ports afterwards
-    (_attach_macs).
+    Raises:
+        ValueError: if mode is not one of MODES.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -239,6 +238,29 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
                 f"({section_lines} lines)",
             )
 
+    # Section detection
+    # -----------------
+    # The capture is a flat stream of lines from many switches. A line shaped like
+    # 'hostname#command' (PROMPT) starts a new section and ends the previous one; every
+    # following line belongs to that section until the next prompt. The hostname (without
+    # the '#') becomes the switch name for all rows in the section. The command, with
+    # whitespace collapsed, decides how the section's lines are read (`kind`):
+    #
+    #   'status'  command is 'show int status'          -> rows become Port/VLAN/status/name
+    #   'mac'     command is 'show mac address-table'   -> rows become MAC entries
+    #   ''        any other command                     -> lines are ignored, and one INFO
+    #                                                      entry records the skipped section
+    #
+    # Each line is first rendered to plain text by clean_line (escape codes stripped,
+    # backspaces replayed), so an edited command line is matched as typed. Within a
+    # section, blank lines, session noise (dashed banners, 'Connection closed.') and
+    # column headers are recognised and set aside. Anything else that doesn't parse is
+    # logged as SKIPPED, so no line is dropped silently. A section with a recognised
+    # command that yields no rows logs a WARNING. Non-noise text before the first prompt
+    # is outside any section and is logged as INFO.
+    #
+    # The MAC table can appear before or after 'show int status' for the same switch, so
+    # MACs are collected during this pass and attached to ports afterwards (_attach_macs).
     lines = split_lines(text)
     total = len(lines)
     for line_no, raw in enumerate(lines, start=1):
