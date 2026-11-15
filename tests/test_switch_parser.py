@@ -3,7 +3,7 @@
 from openpyxl import load_workbook
 
 from analysis.switch_excel import write_workbook
-from analysis.switch_parser import INFO, SKIPPED, WARNING, clean_line, parse_text
+from analysis.switch_parser import SKIPPED, WARNING, clean_line, parse_text
 
 SAMPLE = """\
 \x1b[0m\x1b[33mConnection closed.
@@ -230,7 +230,8 @@ def test_backspace_edited_command_still_parsed_in_both_modes():
             ("sw-name", "Gi1/0/2", "99", "notconnect", "User access"),
             ("sw-name", "Gi1/0/5", "trunk", "connected", "Connected to PRI S"),
         ], mode
-        assert not [e for e in res.log if e.level != INFO or "skipped" in e.message]
+        # only the expected warning: trunk port Gi1/0/5 has no MAC table in this sample
+        assert [e.level for e in res.log] == [WARNING], mode
         assert len(res.raw) == 6  # one per editor line (the trailing newline adds none)
 
 
@@ -252,4 +253,48 @@ def test_summary_sheet_has_run_details_and_counts(tmp_path):
     assert got["output rows"] == len(res.rows) == 5
     assert got["switches with ports"] == 2
     assert got["log SKIPPED"] == 2
-    assert got["log WARNING"] == 0
+    assert got["log WARNING"] == 1  # Te1/0/1 is a trunk with no MAC table data
+
+
+TRUNK_SAMPLE = """sw-t#show int status
+Port         Name               Status       Vlan       Duplex  Speed Type
+Gi1/0/1      uplink             connected    trunk        full   1000 SFP
+Gi1/0/2      access             connected    99           full   1000 SFP
+Gi1/0/3      lonely trunk       connected    trunk        full   1000 SFP
+Gi1/0/4      routed port        connected    routed       full   1000 SFP
+sw-t#show mac address-table
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+  20    aaaa.bbbb.0001    DYNAMIC     Gi1/0/1
+   5    aaaa.bbbb.0002    DYNAMIC     Gi1/0/1
+ 100    aaaa.bbbb.0003    DYNAMIC     Gi1/0/1
+   5    aaaa.bbbb.0004    DYNAMIC     Gi1/0/1
+  10    aaaa.bbbb.0005    DYNAMIC     Gi1/0/2
+  30    aaaa.bbbb.0006    DYNAMIC     Gi1/0/4
+"""
+
+
+def test_trunk_vlan_replaced_by_sorted_list_on_every_row():
+    res = parse_text(TRUNK_SAMPLE)
+    trunk_rows = [(r.vlan, r.mac) for r in res.rows if r.port == "Gi1/0/1"]
+    assert trunk_rows == [
+        ("5,20,100", "aaaa.bbbb.0001"),
+        ("5,20,100", "aaaa.bbbb.0002"),
+        ("5,20,100", "aaaa.bbbb.0003"),
+        ("5,20,100", "aaaa.bbbb.0004"),
+    ]
+
+
+def test_numeric_vlan_untouched_and_other_non_numeric_replaced():
+    res = parse_text(TRUNK_SAMPLE)
+    vlan = {r.port: r.vlan for r in res.rows}
+    assert vlan["Gi1/0/2"] == "99"  # access port keeps its int status VLAN, not the MAC one
+    assert vlan["Gi1/0/4"] == "30"  # 'routed' is non-numeric so it is replaced too
+
+
+def test_trunk_without_mac_vlans_keeps_value_and_warns():
+    res = parse_text(TRUNK_SAMPLE)
+    assert {r.port: r.vlan for r in res.rows}["Gi1/0/3"] == "trunk"
+    warns = [e for e in res.log if e.level == WARNING]
+    assert len(warns) == 1
+    assert "Gi1/0/3" in warns[0].message and "trunk" in warns[0].message

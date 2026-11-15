@@ -115,6 +115,7 @@ class MacEntry:
     mac: str
     line_no: int
     text: str
+    vlan: str = ""  # VLAN column of the MAC table row ('All' for static entries)
 
 
 @dataclass
@@ -314,7 +315,9 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
                 continue
             for port in re.split(r"[,\s]+", mm["ports"].strip()):
                 if port:
-                    macs.append(MacEntry(switch, port, mm["mac"].lower(), line_no, line))
+                    macs.append(
+                        MacEntry(switch, port, mm["mac"].lower(), line_no, line, mm["vlan"])
+                    )
             section_rows += 1
             mark("parsed")
             continue
@@ -363,9 +366,21 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
     return res
 
 
+def _vlan_sort_key(vlan: str) -> tuple[int, int, str]:
+    """Numeric VLANs in numeric order, then anything else (e.g. 'All') alphabetically."""
+    return (0, int(vlan), "") if vlan.isdigit() else (1, 0, vlan.lower())
+
+
 def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
-    """Expand res.rows to one row per (port, MAC); log MACs on ports not in 'int status'."""
+    """Expand res.rows to one row per (port, MAC); log MACs on ports not in 'int status'.
+
+    'show int status' gives only a word such as 'trunk' for ports carrying many VLANs. When a
+    port's VLAN is not a plain number, it is replaced by the sorted, comma-joined VLANs seen
+    on that port in the MAC table (the same list on every row for the port). If the MAC table
+    shows none, the original value is kept and a WARNING is logged.
+    """
     by_port: dict[tuple[str, str], list[str]] = {}
+    vlans_by_port: dict[tuple[str, str], set[str]] = {}
     known = {(r.switch, r.port.lower()) for r in res.rows}
     for e in macs:
         key = (e.switch, e.port.lower())
@@ -383,12 +398,31 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
         found = by_port.setdefault(key, [])
         if e.mac not in found:
             found.append(e.mac)
+        if e.vlan:
+            vlans_by_port.setdefault(key, set()).add(e.vlan)
 
     expanded: list[Row] = []
     for r in res.rows:
-        found = by_port.get((r.switch, r.port.lower()), [""])
+        key = (r.switch, r.port.lower())
+        vlan = r.vlan
+        if not vlan.isdigit():
+            seen_vlans = vlans_by_port.get(key)
+            if seen_vlans:
+                vlan = ",".join(sorted(seen_vlans, key=_vlan_sort_key))
+            else:
+                res.log.append(
+                    LogEntry(
+                        r.line_no,
+                        WARNING,
+                        r.switch,
+                        f"port {r.port} VLAN is '{r.vlan}' and no VLANs were found in the MAC "
+                        "table, so it is left as is",
+                        "",
+                    )
+                )
+        found = by_port.get(key, [""])
         expanded.extend(
-            Row(r.switch, r.port, r.vlan, r.line_no, mac, r.status, r.name) for mac in found
+            Row(r.switch, r.port, vlan, r.line_no, mac, r.status, r.name) for mac in found
         )
     res.rows = expanded
 
