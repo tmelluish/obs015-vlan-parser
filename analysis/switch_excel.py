@@ -70,11 +70,27 @@ def write_workbook(
 
     ws = wb.active
     ws.title = "Switch VLANs"
-    ws.append(["switch", "port", "VLAN", "port status", "port name", "MAC count", "MAC addresses"])
+    ws.append(
+        [
+            "switch",
+            "port",
+            "VLAN",
+            "port status",
+            "port name",
+            "MAC count",
+            "MAC addresses",
+            "IP addresses",
+            "IP mapping",
+        ]
+    )
     for i, r in enumerate(res.rows, start=1):
-        _append(ws, i + 1, [r.switch, r.port, r.vlan, r.status, r.name, r.mac_count, r.macs])
+        _append(
+            ws,
+            i + 1,
+            [r.switch, r.port, r.vlan, r.status, r.name, r.mac_count, r.macs, r.ips, r.ip_map],
+        )
         tick("Writing 'Switch VLANs'", i, len(res.rows))
-    _finish(ws, [28, 16, 14, 14, 30, 11, 60])
+    _finish(ws, [28, 16, 14, 14, 30, 11, 60, 40, 80])
 
     ws = wb.create_sheet("VLANs")
     ws.append(["VLAN", "switches"])

@@ -71,6 +71,17 @@ MAC_ROW = re.compile(
     r"^(?P<vlan>\S+)\s+(?P<mac>[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s+\S+\s+(?P<ports>.+)$",
     re.IGNORECASE,
 )
+# Any reasonable ARP listing: 'show ip arp', 'show arp', 'sh ip arp vrf X', 'show ip arp 10.0.0.1'.
+ARP_TABLE = re.compile(r"^sh(?:ow)?\s+(?:ip\s+)?arp(?:\s.*)?$", re.IGNORECASE)
+ARP_HEADER = re.compile(r"^(?:Protocol\s+)?Address\s+Age\b", re.IGNORECASE)
+# 'Internet  10.0.0.1  0  7802.b1d3.0001  ARPA  Vlan99': the IP, then the MAC further along the
+# line. The Protocol and Interface columns (and any others) are ignored.
+ARP_ROW = re.compile(
+    r"^(?:\S+\s+)?(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+.*?"
+    r"(?P<mac>[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\b",
+    re.IGNORECASE,
+)
+ARP_INCOMPLETE = re.compile(r"\bincomplete\b", re.IGNORECASE)
 PORT_START = re.compile(r"^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?\s")
 
 STATUSES = (
@@ -107,6 +118,8 @@ class Row:
     status: str = ""
     name: str = ""
     mac_count: int = 0  # true number of MACs, even if the list was truncated
+    ips: str = ""  # comma-joined IPs (from 'show ip arp') of the MACs on the port
+    ip_map: str = ""  # comma-joined '(MAC,IP)' pairs for the MACs on the port
 
 
 @dataclass
@@ -140,6 +153,7 @@ class ParseResult:
     rows: list[Row] = field(default_factory=list)
     raw: list[RawLine] = field(default_factory=list)
     log: list[LogEntry] = field(default_factory=list)
+    arp_entries: int = 0  # ARP rows read (MAC and IP both present), matched to a port or not
 
 
 # progress(stage, done, total) is called periodically by the long-running steps.
@@ -216,13 +230,14 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
     cols: list[int] | None = None
     switch = ""
     cmd = ""
-    kind = ""  # "status", "mac" or "" (other command)
+    kind = ""  # "status", "mac", "arp" or "" (other command)
     in_section = False
     section_start = 0
     section_lines = 0
     section_rows = 0
     seen: set[tuple[str, str]] = set()
     macs: list[MacEntry] = []
+    arp: dict[str, set[str]] = {}  # MAC -> IPs, pooled across all switches
 
     def log(line_no: int, level: str, message: str, line: str = "") -> None:
         res.log.append(LogEntry(line_no, level, switch, message, line))
@@ -236,8 +251,8 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
             log(
                 section_start,
                 INFO,
-                f"section skipped (not 'show int status' / 'show mac address-table'): '{cmd}' "
-                f"({section_lines} lines)",
+                "section skipped (not 'show int status' / 'show mac address-table' / "
+                f"'show ip arp'): '{cmd}' ({section_lines} lines)",
             )
 
     # Section detection
@@ -250,6 +265,7 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
     #
     #   'status'  command is 'show int status'          -> rows become Port/VLAN/status/name
     #   'mac'     command is 'show mac address-table'   -> rows become MAC entries
+    #   'arp'     command is 'show ip arp' (or similar) -> rows become MAC -> IP pairs
     #   ''        any other command                     -> lines are ignored, and one INFO
     #                                                      entry records the skipped section
     #
@@ -263,6 +279,8 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
     #
     # The MAC table can appear before or after 'show int status' for the same switch, so
     # MACs are collected during this pass and attached to ports afterwards (_attach_macs).
+    # ARP entries are pooled across switches by MAC, so a router's ARP table gives IPs to the
+    # ports of every switch that saw the MAC.
     lines = split_lines(text)
     total = len(lines)
     for line_no, raw in enumerate(lines, start=1):
@@ -283,7 +301,15 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
             close_section()
             switch = prompt["switch"]
             cmd = " ".join(prompt["cmd"].split())
-            kind = "status" if INT_STATUS.match(cmd) else "mac" if MAC_TABLE.match(cmd) else ""
+            kind = (
+                "status"
+                if INT_STATUS.match(cmd)
+                else "mac"
+                if MAC_TABLE.match(cmd)
+                else "arp"
+                if ARP_TABLE.match(cmd)
+                else ""
+            )
             in_section = True
             cols = None
             section_start, section_lines, section_rows = line_no, 0, 0
@@ -303,6 +329,24 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
 
         if not kind:
             mark("ignored")
+            continue
+
+        if kind == "arp":
+            if ARP_HEADER.match(line):
+                mark("header")
+                continue
+            am = ARP_ROW.match(line)
+            if am:
+                arp.setdefault(am["mac"].lower(), set()).add(am["ip"])
+                res.arp_entries += 1
+            elif ARP_INCOMPLETE.search(line):
+                pass  # no MAC resolved yet: nothing to map (still shown in Raw data)
+            else:
+                log(line_no, SKIPPED, "unrecognised line inside ARP table section", line)
+                mark("skipped")
+                continue
+            section_rows += 1
+            mark("parsed" if am else "ignored")
             continue
 
         if kind == "mac":
@@ -361,7 +405,7 @@ def parse_text(text: str, progress: Progress | None = None, mode: str = "regex")
         mark("parsed")
 
     close_section()
-    _attach_macs(res, macs)
+    _attach_macs(res, macs, arp)
     if progress:
         progress("Parsing", total, total)
     return res
@@ -374,10 +418,10 @@ LIST_SEP = ", "
 
 
 def _join_macs(macs: list[str]) -> tuple[str, int]:
-    """Join MACs with LIST_SEP; if too long for a cell, keep whole MACs that fit and end with
-    LIST_SEP + '...'.
+    """Join items (MACs, IPs or '(MAC,IP)' pairs) with LIST_SEP; if too long for a cell, keep
+    whole items that fit and end with LIST_SEP + '...'.
 
-    Returns (text, number of MACs included).
+    Returns (text, number of items included).
     """
     text = LIST_SEP.join(macs)
     if len(text) <= MAC_CELL_LIMIT:
@@ -398,8 +442,16 @@ def _vlan_sort_key(vlan: str) -> tuple[int, int, str]:
     return (0, int(vlan), "") if vlan.isdigit() else (1, 0, vlan.lower())
 
 
-def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
-    """Add each port's sorted MAC list and VLAN list to res.rows (still one row per port).
+def _ip_key(ip: str) -> tuple[int, ...]:
+    return tuple(int(octet) for octet in ip.split("."))
+
+
+def _attach_macs(res: ParseResult, macs: list[MacEntry], arp: dict[str, set[str]]) -> None:
+    """Add each port's sorted MAC list, VLAN list and IP columns to res.rows (one row per port).
+
+    IPs come from the ARP table by MAC alone (any switch's ARP table, any VLAN). `ips` is the
+    port's unique IPs in numeric order; `ip_map` is its unique '(MAC,IP)' pairs by MAC then IP.
+    Both are blank for a port with no ARP match; ARP entries matching no port are discarded.
 
     MACs on ports not in 'int status' (e.g. CPU) are logged instead. A MAC list too long for an
     Excel cell is truncated with a WARNING; mac_count always holds the true total.
@@ -463,7 +515,35 @@ def _attach_macs(res: ParseResult, macs: list[MacEntry]) -> None:
                     "",
                 )
             )
-        expanded.append(Row(r.switch, r.port, vlan, r.line_no, text, r.status, r.name, len(found)))
+        pairs = sorted(
+            ((m, ip) for m in found for ip in arp.get(m, ())), key=lambda p: (p[0], _ip_key(p[1]))
+        )
+        ips_text, ips_kept = _join_macs(sorted({ip for _, ip in pairs}, key=_ip_key))
+        map_text, map_kept = _join_macs([f"({m},{ip})" for m, ip in pairs])
+        if ips_kept < len({ip for _, ip in pairs}) or map_kept < len(pairs):
+            res.log.append(
+                LogEntry(
+                    r.line_no,
+                    WARNING,
+                    r.switch,
+                    f"port {r.port}: IP lists exceed the Excel cell limit and were truncated",
+                    "",
+                )
+            )
+        expanded.append(
+            Row(
+                r.switch,
+                r.port,
+                vlan,
+                r.line_no,
+                text,
+                r.status,
+                r.name,
+                len(found),
+                ips_text,
+                map_text,
+            )
+        )
     res.rows = expanded
 
 
@@ -510,5 +590,7 @@ def build_summary(
         ("distinct ports", len({(r.switch, r.port) for r in res.rows})),
         ("ports with a MAC", sum(1 for r in res.rows if r.mac_count)),
         ("MAC addresses seen on ports", sum(r.mac_count for r in res.rows)),
+        ("ARP entries read", res.arp_entries),
+        ("ports with an IP", sum(1 for r in res.rows if r.ips)),
         *((f"log {lvl}", log_counts.get(lvl, 0)) for lvl in (SKIPPED, WARNING, INFO)),
     ]

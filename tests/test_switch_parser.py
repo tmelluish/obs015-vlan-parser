@@ -1,5 +1,7 @@
 """Tests use only synthetic switch text built inline (no data files)."""
 
+from datetime import datetime
+
 from openpyxl import load_workbook
 
 from analysis.switch_excel import write_workbook
@@ -7,6 +9,7 @@ from analysis.switch_parser import (
     MAC_CELL_LIMIT,
     SKIPPED,
     WARNING,
+    build_summary,
     clean_line,
     parse_text,
     vlan_switches,
@@ -97,6 +100,72 @@ def test_vlan_switches_numeric_only_sorted_and_split():
     ]  # 'trunk' (no MAC VLANs) is not listed
 
 
+ARP_SAMPLE = """sw-a#show int status
+Port         Name               Status       Vlan       Duplex  Speed Type
+Gi1/0/1      host one           connected    99           full   1000 SFP
+Gi1/0/2      host two           connected    99           full   1000 SFP
+Gi1/0/3      empty              notconnect   99           full   1000 SFP
+sw-a#show mac address-table
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+  99    aaaa.bbbb.0001    DYNAMIC     Gi1/0/1
+  99    aaaa.bbbb.0002    DYNAMIC     Gi1/0/1
+  99    aaaa.bbbb.0003    DYNAMIC     Gi1/0/2
+rtr-1#Show ip arp
+Protocol  Address          Age (min)  Hardware Addr   Type   Interface
+Internet  10.0.187.129            0   aaaa.bbbb.0001  ARPA   Vlan99
+Internet  10.0.187.20             3   AAAA.BBBB.0001  ARPA   Vlan99
+Internet  10.0.187.9              -   aaaa.bbbb.0002  ARPA   Vlan99
+Internet  10.0.187.9              1   aaaa.bbbb.0003  ARPA   Vlan99
+Internet  10.0.187.77             0   Incomplete      ARPA
+Internet  10.0.187.99             0   cccc.dddd.0009  ARPA   Vlan99
+"""
+
+
+def test_ip_columns_match_by_mac_and_dedupe_numerically():
+    res = parse_text(ARP_SAMPLE)
+    by_port = {r.port: (r.ips, r.ip_map) for r in res.rows}
+    assert by_port["Gi1/0/1"] == (
+        "10.0.187.9, 10.0.187.20, 10.0.187.129",
+        "(aaaa.bbbb.0001,10.0.187.20), (aaaa.bbbb.0001,10.0.187.129), (aaaa.bbbb.0002,10.0.187.9)",
+    )
+    # Gi1/0/1's MAC 0002 and Gi1/0/2's MAC 0003 share an IP; each port still lists it once
+    assert by_port["Gi1/0/2"] == ("10.0.187.9", "(aaaa.bbbb.0003,10.0.187.9)")
+    assert by_port["Gi1/0/3"] == ("", "")  # no MACs, so blank
+
+
+def test_arp_unmatched_incomplete_and_summary():
+    res = parse_text(ARP_SAMPLE)
+    assert res.arp_entries == 5  # 'Incomplete' is not counted
+    assert not [e for e in res.log if e.level == SKIPPED]  # unmatched ARP entries just dropped
+    got = dict(build_summary(res, "in.txt", "out.xlsx", "regex", datetime(2026, 1, 1)))
+    assert got["ARP entries read"] == 5
+    assert got["ports with an IP"] == 2
+
+
+def test_arp_command_variants_and_other_columns():
+    text = (
+        "sw-a#show int status\n"
+        "Gi1/0/1 x connected 5 full 1000 SFP\n"
+        "sw-a#show mac address-table\n"
+        " 5 aaaa.bbbb.0001 DYNAMIC Gi1/0/1\n"
+        "rtr#sh ip arp vrf MGMT\n"
+        "Address          Age (min)  Hardware Addr   Type   Interface\n"
+        "10.1.1.1               0   aaaa.bbbb.0001  ARPA   Vlan5\n"
+        "rtr#show arp\n"
+        "10.1.1.2   aaaa.bbbb.0001  Vlan5\n"
+    )
+    res = parse_text(text)
+    assert res.rows[0].ips == "10.1.1.1, 10.1.1.2"
+
+
+def test_ip_columns_written_after_mac_addresses(tmp_path):
+    out = tmp_path / "o.xlsx"
+    write_workbook(parse_text(ARP_SAMPLE), str(out))
+    head = next(iter(load_workbook(out)["Switch VLANs"].values))
+    assert head[6:] == ("MAC addresses", "IP addresses", "IP mapping")
+
+
 def test_vlans_sheet_follows_switch_vlans(tmp_path):
     out = tmp_path / "o.xlsx"
     write_workbook(parse_text(TRUNK_SAMPLE), str(out))
@@ -120,6 +189,8 @@ def test_workbook_has_four_sheets(tmp_path):
         "port name",
         "MAC count",
         "MAC addresses",
+        "IP addresses",
+        "IP mapping",
     ]
     assert wb["Switch VLANs"].max_row == 1 + 5
     assert wb["Raw data"].max_row == 1 + len(SAMPLE.splitlines())

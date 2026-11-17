@@ -3,11 +3,13 @@
 Turns a text capture of many network switches into an Excel report showing which VLANs and MAC
 addresses are on each port of each switch.
 
-It reads the output of two commands per switch and merges them:
+It reads the output of up to three commands per switch and merges them:
 
 - `show int status` gives each port's name, status and VLAN.
 - `show mac address-table` gives the MAC addresses seen on each port and, for trunk ports (where
   `show int status` only says `trunk`), the VLANs carried.
+- `show ip arp` (optional) gives the IP address of each MAC. ARP entries are matched to ports by
+  MAC address alone, using the ARP tables of all switches in the file.
 
 ## Input
 
@@ -23,7 +25,8 @@ Terminal clutter such as colour codes, backspaces and `\r\r\n` line endings is c
 files (e.g. from a PowerShell redirect) are detected automatically.
 
 Recognised commands: `show int status` / `show interfaces status`, and `show mac address-table` /
-`show mac-address-table` (optionally with extra arguments). Abbreviated commands such as
+`show mac-address-table` (optionally with extra arguments), and `show ip arp` / `show arp`
+(optionally abbreviated `sh`, or with arguments such as `vrf X`). Other abbreviated commands such as
 `sh int stat` are not recognised; the section is skipped and logged.
 
 ## Usage
@@ -50,7 +53,7 @@ The terminal shows progress and then a summary of counts only (never rows).
 
 | Sheet | Contents |
 | --- | --- |
-| Switch VLANs | One row per port: switch, port, VLAN, port status, port name, MAC count, MAC addresses |
+| Switch VLANs | One row per port: switch, port, VLAN, port status, port name, MAC count, MAC addresses, IP addresses, IP mapping |
 | VLANs | One row per distinct numeric VLAN: VLAN, and the switches where it was seen (comma-separated) |
 | Raw data | Every input line with how it was handled (parsed, header, blank, noise, ignored, skipped) |
 | Log | Lines that were skipped or look odd, highlighted by level (SKIPPED, WARNING, INFO) |
@@ -64,6 +67,10 @@ Notes on the Switch VLANs sheet:
 - MAC addresses on a port are listed sorted and comma-separated. `MAC count` is the true total.
   A list too long for an Excel cell is cut at a whole address, ends with `, ...` and is logged.
 - MAC addresses on ports that are not in `show int status` (e.g. `CPU`) appear only in the Log.
+- `IP addresses` lists the unique IPs (numeric order) of the MACs on the port; `IP mapping` lists
+  unique `(MAC,IP)` pairs, e.g. `(aaaa.bbbb.0001,10.0.0.5)`. Both are blank if the port's MACs
+  have no ARP entry. ARP entries for MACs on no port, and `Incomplete` entries, are dropped
+  (incomplete rows still appear in Raw data as `ignored`). Over-long lists are truncated and logged.
 - Every port is included regardless of connection status.
 
 ## Development
